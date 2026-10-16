@@ -1,7 +1,7 @@
 """
 SISTEMAS·TI - Vapi to WhatsApp Cloud Bridge (Render Deployment)
 Recibe el evento end-of-call-report de Vapi y despacha automáticamente
-el mensaje de WhatsApp con los datos de la cita vía Evolution API.
+el mensaje de WhatsApp con los datos detallados de la cita vía Evolution API.
 """
 
 import os
@@ -35,23 +35,59 @@ def limpiar_telefono(tlf):
     return t
 
 def extraer_detalles_cita(transcript, raw_summary):
-    """Extrae de forma limpia el nombre, servicio y hora de la conversación."""
-    if raw_summary and len(raw_summary.strip()) > 10:
+    """Extrae de forma limpia y desglosada: Cliente, Servicio, Fecha y Hora."""
+    if raw_summary and len(raw_summary.strip()) > 20:
         return raw_summary.strip()
     
     if not transcript:
-        return "Cita agendada correctamente durante la llamada telefónica con Sofía."
+        return "• *Estado:* Cita confirmada con el salón"
         
-    m_nom = re.search(r"Perfecto,\s*([A-ZÁÉÍÓÚa-záéíóú]+)\.", transcript)
-    nombre = m_nom.group(1).capitalize() if m_nom else "Cliente"
+    nombres_prohibidos = {'sofía', 'sofia', 'estilo', 'peluquería', 'peluqueria', 'gracias', 'hola', 'para', 'cita', 'buenos', 'días', 'tardes'}
     
-    m_cierre = re.search(r"tu cita queda confirmada para\s+([^.]+)", transcript, re.IGNORECASE)
-    if m_cierre:
-        reserva = m_cierre.group(1).strip()
-        reserva = reserva[0].upper() + reserva[1:] if len(reserva) > 1 else reserva
-        return f"• *Cliente:* {nombre}\n• *Reserva:* {reserva}"
+    # 1. Nombre del cliente
+    nombre = "Cliente"
+    m_user = re.search(r'User:[^\n]*(?:me llamo|soy|a nombre de)\s+([A-ZÁÉÍÓÚa-záéíóú]+)', transcript, re.IGNORECASE)
+    if m_user and m_user.group(1).lower() not in nombres_prohibidos:
+        nombre = m_user.group(1).capitalize()
+    else:
+        m_line = re.search(r'User:\s*([A-ZÁÉÍÓÚa-záéíóú]{2,15})\.?\s*$', transcript, re.MULTILINE)
+        if m_line and m_line.group(1).lower() not in nombres_prohibidos:
+            nombre = m_line.group(1).capitalize()
+        else:
+            m_bot = re.search(r'(?:perfecto|apuntado|confirmada|entonces|estupendo),?\s+([A-ZÁÉÍÓÚa-záéíóú]+)', transcript, re.IGNORECASE)
+            if m_bot and m_bot.group(1).lower() not in nombres_prohibidos:
+                nombre = m_bot.group(1).capitalize()
 
-    return f"• *Cliente:* {nombre}\n• *Estado:* Cita confirmada con el salón"
+    # 2. Servicio
+    servicio = "Corte de pelo"
+    if re.search(r'barba', transcript, re.IGNORECASE):
+        servicio = "Corte y arreglo de barba"
+    elif re.search(r'mechas|balayage', transcript, re.IGNORECASE):
+        servicio = "Mechas Balayage"
+    elif re.search(r'tinte|color', transcript, re.IGNORECASE):
+        servicio = "Tinte / Coloración completa"
+    elif re.search(r'peinado|lavar|peinar', transcript, re.IGNORECASE):
+        servicio = "Lavado y peinado"
+
+    # 3. Día (priorizar días específicos sobre el 'hoy' de saludo)
+    dia = "Hoy"
+    dias = re.findall(r'\b(pasado mañana|mañana|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|hoy)\b', transcript, re.IGNORECASE)
+    for d in dias:
+        if d.lower() != 'hoy':
+            dia = d.capitalize()
+            break
+
+    # 4. Hora
+    hora = "A convenir"
+    m_hora = re.search(r'\b((?:a )?las \d+([:\.]\d+)?(?:\s+y media|\s+y cuarto)?(?:\s+de la tarde|\s+de la mañana|\s+del mediodía)?|(?:a )?las (?:una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)(?:\s+y media|\s+y cuarto)?(?:\s+de la tarde|\s+de la mañana)?)\b', transcript, re.IGNORECASE)
+    if m_hora:
+        hora = m_hora.group(0).capitalize()
+    elif re.search(r'6 y media|seis y media', transcript, re.IGNORECASE):
+        hora = "A las 6 y media de la tarde"
+    elif re.search(r'5 de la tarde|cinco de la tarde', transcript, re.IGNORECASE):
+        hora = "A las 5 de la tarde"
+
+    return f"• *Cliente:* {nombre}\n• *Servicio:* {servicio}\n• *Fecha:* {dia}\n• *Hora:* {hora}"
 
 def enviar_whatsapp_cloud(telefono, mensaje):
     tel_clean = limpiar_telefono(telefono)
@@ -69,7 +105,8 @@ def enviar_whatsapp_cloud(telefono, mensaje):
         "apikey": EVOLUTION_API_KEY
     }
 
-    for intento in range(1, 4):
+    # Reintentos con tolerancia a cold start (502 Bad Gateway / arranque de Render)
+    for intento in range(1, 6):
         try:
             data = json.dumps(payload).encode('utf-8')
             req = urllib.request.Request(EVOLUTION_SEND_URL, data=data, headers=headers, method="POST")
@@ -78,10 +115,17 @@ def enviar_whatsapp_cloud(telefono, mensaje):
                 elapsed = time.time() - start
                 log(f"✅ ¡WhatsApp enviado con éxito en {elapsed:.2f}s! Status: {resp.status}")
                 return True
+        except urllib.error.HTTPError as e:
+            log(f"⚠️ Intento {intento}/5 falló con HTTP {e.code}: {e.reason}")
+            if e.code == 502 or e.code == 503:
+                log("⏳ Servidor arrancando (cold boot), esperando 10s antes de reintentar...")
+                time.sleep(10)
+            elif intento < 5:
+                time.sleep(3)
         except Exception as e:
-            log(f"⚠️ Intento {intento}/3 falló: {e}")
-            if intento < 3:
-                time.sleep(2)
+            log(f"⚠️ Intento {intento}/5 falló: {e}")
+            if intento < 5:
+                time.sleep(4)
     return False
 
 def procesar_evento_vapi(payload):
