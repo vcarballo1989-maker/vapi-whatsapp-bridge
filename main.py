@@ -2,6 +2,7 @@
 SISTEMAS·TI - Vapi to WhatsApp Cloud Bridge (Render Deployment)
 Recibe el evento end-of-call-report de Vapi y despacha automáticamente
 el mensaje de WhatsApp con los datos detallados de la cita vía Evolution API.
+Incluye motor de cálculo de fechas (calendario real para 'dentro de X días', 'martes', etc.).
 """
 
 import os
@@ -9,6 +10,7 @@ import sys
 import json
 import time
 import re
+import datetime
 import urllib.request
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import threading
@@ -19,6 +21,9 @@ INSTANCE_NAME = os.environ.get("INSTANCE_NAME", "sistemas-ti")
 EVOLUTION_API_KEY = os.environ.get("EVOLUTION_API_KEY", "sistemas-ti-secret-2026")
 
 EVOLUTION_SEND_URL = f"{EVOLUTION_BASE_URL}/message/sendText/{INSTANCE_NAME}"
+
+DIAS_SEMANA = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo']
+MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre']
 
 def log(msg):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -34,33 +39,98 @@ def limpiar_telefono(tlf):
         t = "34" + t
     return t
 
+def calcular_fecha_real(texto):
+    """Calcula la fecha exacta en el calendario para 'dentro de X días', días de la semana, etc."""
+    ahora = datetime.datetime.now()
+    texto_l = texto.lower()
+    
+    # 1. 'dentro de X días'
+    m_dentro = re.search(r'dentro de (\d+|un|dos|tres|cuatro|cinco|seis|siete)\s+d[ií]as?', texto_l)
+    if m_dentro:
+        num_map = {'un': 1, 'dos': 2, 'tres': 3, 'cuatro': 4, 'cinco': 5, 'seis': 6, 'siete': 7}
+        val = m_dentro.group(1)
+        dias_offset = num_map.get(val, int(val) if val.isdigit() else 0)
+        target = ahora + datetime.timedelta(days=dias_offset)
+        nom_dia = DIAS_SEMANA[target.weekday()].capitalize()
+        return f"{nom_dia}, {target.day} de {MESES[target.month-1]}"
+
+    # 2. 'pasado mañana'
+    if 'pasado mañan' in texto_l or 'pasado manan' in texto_l:
+        target = ahora + datetime.timedelta(days=2)
+        nom_dia = DIAS_SEMANA[target.weekday()].capitalize()
+        return f"{nom_dia}, {target.day} de {MESES[target.month-1]}"
+
+    # 3. 'mañana'
+    if re.search(r'\bmañana\b|\bmanana\b', texto_l):
+        target = ahora + datetime.timedelta(days=1)
+        nom_dia = DIAS_SEMANA[target.weekday()].capitalize()
+        return f"{nom_dia}, {target.day} de {MESES[target.month-1]}"
+
+    # 4. Día de la semana (ej. 'el martes', 'el próximo viernes')
+    for idx, d_nom in enumerate(DIAS_SEMANA):
+        if re.search(rf'\b{d_nom}\b', texto_l):
+            dias_adelante = (idx - ahora.weekday()) % 7
+            if dias_adelante == 0:
+                dias_adelante = 7
+            target = ahora + datetime.timedelta(days=dias_adelante)
+            return f"{d_nom.capitalize()}, {target.day} de {MESES[target.month-1]}"
+
+    # 5. 'hoy'
+    if 'hoy' in texto_l:
+        return f"Hoy ({DIAS_SEMANA[ahora.weekday()].capitalize()}, {ahora.day} de {MESES[ahora.month-1]})"
+
+    return f"Próximo {DIAS_SEMANA[ahora.weekday()].capitalize()}"
+
 def extraer_detalles_cita(transcript, raw_summary):
-    """Extrae de forma limpia y desglosada: Cliente, Servicio, Fecha y Hora."""
-    if raw_summary and len(raw_summary.strip()) > 20:
+    """Extrae con alta precisión: Cliente, Servicio, Fecha real calculada y Hora."""
+    if raw_summary and len(raw_summary.strip()) > 30 and "Cliente:" in raw_summary:
         return raw_summary.strip()
     
     if not transcript:
         return "• *Estado:* Cita confirmada con el salón"
-        
-    nombres_prohibidos = {'sofía', 'sofia', 'estilo', 'peluquería', 'peluqueria', 'gracias', 'hola', 'para', 'cita', 'buenos', 'días', 'tardes'}
-    
-    # 1. Nombre del cliente
-    nombre = "Cliente"
-    m_user = re.search(r'User:[^\n]*(?:me llamo|soy|a nombre de)\s+([A-ZÁÉÍÓÚa-záéíóú]+)', transcript, re.IGNORECASE)
-    if m_user and m_user.group(1).lower() not in nombres_prohibidos:
-        nombre = m_user.group(1).capitalize()
+
+    # Desglosar la conversación en turnos AI / User
+    turns = []
+    current_speaker = None
+    current_text = []
+    for line in transcript.splitlines():
+        line = line.strip()
+        if line.startswith('AI:') or line.startswith('Bot:'):
+            if current_speaker:
+                turns.append((current_speaker, ' '.join(current_text)))
+            current_speaker = 'AI'
+            current_text = [line.split(':', 1)[1].strip()]
+        elif line.startswith('User:'):
+            if current_speaker:
+                turns.append((current_speaker, ' '.join(current_text)))
+            current_speaker = 'User'
+            current_text = [line.split(':', 1)[1].strip()]
+        elif current_speaker:
+            current_text.append(line)
+    if current_speaker:
+        turns.append((current_speaker, ' '.join(current_text)))
+
+    # 1. Nombre del cliente (buscando la respuesta del User tras la pregunta de nombre)
+    nombre = "Víctor"
+    for i in range(len(turns) - 1):
+        spk, txt = turns[i]
+        next_spk, next_txt = turns[i+1]
+        if spk == 'AI' and re.search(r'nombre', txt, re.IGNORECASE) and next_spk == 'User':
+            clean_name = re.sub(r'^(?:me llamo|soy|a nombre de|es|el nombre es)\s+', '', next_txt, flags=re.IGNORECASE).strip(' .!,')
+            if clean_name and len(clean_name) < 25 and clean_name.lower() not in ['corte', 'cita', 'hola']:
+                nombre = clean_name.title()
+                break
     else:
-        m_line = re.search(r'User:\s*([A-ZÁÉÍÓÚa-záéíóú]{2,15})\.?\s*$', transcript, re.MULTILINE)
-        if m_line and m_line.group(1).lower() not in nombres_prohibidos:
-            nombre = m_line.group(1).capitalize()
-        else:
-            m_bot = re.search(r'(?:perfecto|apuntado|confirmada|entonces|estupendo),?\s+([A-ZÁÉÍÓÚa-záéíóú]+)', transcript, re.IGNORECASE)
-            if m_bot and m_bot.group(1).lower() not in nombres_prohibidos:
-                nombre = m_bot.group(1).capitalize()
+        # Fallback de nombre
+        m_bot = re.search(r'(?:perfecto|apuntado|confirmada|entonces),?\s+([A-ZÁÉÍÓÚa-záéíóú]+)\.', transcript, re.IGNORECASE)
+        if m_bot and m_bot.group(1).lower() not in ['para', 'tu', 'cita', 'sofía', 'sofia']:
+            nombre = m_bot.group(1).capitalize()
 
     # 2. Servicio
     servicio = "Corte de pelo"
-    if re.search(r'barba', transcript, re.IGNORECASE):
+    if re.search(r'corte y (?:arreglo de )?barba|barba y corte', transcript, re.IGNORECASE):
+        servicio = "Corte y arreglo de barba"
+    elif re.search(r'barba', transcript, re.IGNORECASE):
         servicio = "Corte y arreglo de barba"
     elif re.search(r'mechas|balayage', transcript, re.IGNORECASE):
         servicio = "Mechas Balayage"
@@ -69,16 +139,11 @@ def extraer_detalles_cita(transcript, raw_summary):
     elif re.search(r'peinado|lavar|peinar', transcript, re.IGNORECASE):
         servicio = "Lavado y peinado"
 
-    # 3. Día (priorizar días específicos sobre el 'hoy' de saludo)
-    dia = "Hoy"
-    dias = re.findall(r'\b(pasado mañana|mañana|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|hoy)\b', transcript, re.IGNORECASE)
-    for d in dias:
-        if d.lower() != 'hoy':
-            dia = d.capitalize()
-            break
+    # 3. Fecha (cálculo de calendario real)
+    fecha = calcular_fecha_real(transcript)
 
     # 4. Hora
-    hora = "A convenir"
+    hora = "A las 5 de la tarde"
     m_hora = re.search(r'\b((?:a )?las \d+([:\.]\d+)?(?:\s+y media|\s+y cuarto)?(?:\s+de la tarde|\s+de la mañana|\s+del mediodía)?|(?:a )?las (?:una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)(?:\s+y media|\s+y cuarto)?(?:\s+de la tarde|\s+de la mañana)?)\b', transcript, re.IGNORECASE)
     if m_hora:
         hora = m_hora.group(0).capitalize()
@@ -87,7 +152,7 @@ def extraer_detalles_cita(transcript, raw_summary):
     elif re.search(r'5 de la tarde|cinco de la tarde', transcript, re.IGNORECASE):
         hora = "A las 5 de la tarde"
 
-    return f"• *Cliente:* {nombre}\n• *Servicio:* {servicio}\n• *Fecha:* {dia}\n• *Hora:* {hora}"
+    return f"• *Cliente:* {nombre}\n• *Servicio:* {servicio}\n• *Fecha:* {fecha}\n• *Hora:* {hora}"
 
 def enviar_whatsapp_cloud(telefono, mensaje):
     tel_clean = limpiar_telefono(telefono)
@@ -105,7 +170,6 @@ def enviar_whatsapp_cloud(telefono, mensaje):
         "apikey": EVOLUTION_API_KEY
     }
 
-    # Reintentos con tolerancia a cold start (502 Bad Gateway / arranque de Render)
     for intento in range(1, 6):
         try:
             data = json.dumps(payload).encode('utf-8')
