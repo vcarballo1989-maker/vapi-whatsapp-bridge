@@ -47,7 +47,7 @@ EVOLUTION_API_KEY = os.environ.get("EVOLUTION_API_KEY", "sistemas-ti-secret-2026
 _DEFAULT_CAL_B64 = "Y2FsX2xpdmVfYWY3Y2EzYTIyMzVkYjRhMGIzNjMxMTE1N2YwNjc5MDQ="
 CAL_API_KEY = os.environ.get("CAL_API_KEY") or base64.b64decode(_DEFAULT_CAL_B64).decode("utf-8")
 CAL_EVENT_TYPE_ID = int(os.environ.get("CAL_EVENT_TYPE_ID", "7568380"))
-CAL_ATTENDEE_EMAIL = os.environ.get("CAL_ATTENDEE_EMAIL", "soporte@sistemas-ti.es")
+CAL_ATTENDEE_EMAIL = os.environ.get("CAL_ATTENDEE_EMAIL", "v.carballo1989@gmail.com")
 
 EVOLUTION_SEND_URL = f"{EVOLUTION_BASE_URL}/message/sendText/{INSTANCE_NAME}"
 CAL_BOOKINGS_URL = "https://api.cal.com/v2/bookings"
