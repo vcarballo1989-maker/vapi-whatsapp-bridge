@@ -47,7 +47,7 @@ EVOLUTION_API_KEY = os.environ.get("EVOLUTION_API_KEY", "sistemas-ti-secret-2026
 _DEFAULT_CAL_B64 = "Y2FsX2xpdmVfYWY3Y2EzYTIyMzVkYjRhMGIzNjMxMTE1N2YwNjc5MDQ="
 CAL_API_KEY = os.environ.get("CAL_API_KEY") or base64.b64decode(_DEFAULT_CAL_B64).decode("utf-8")
 CAL_EVENT_TYPE_ID = int(os.environ.get("CAL_EVENT_TYPE_ID", "7568380"))
-CAL_ATTENDEE_EMAIL = os.environ.get("CAL_ATTENDEE_EMAIL", "v.carballo1989@gmail.com")
+CAL_ATTENDEE_EMAIL = os.environ.get("CAL_ATTENDEE_EMAIL", "noreply@example.com")
 
 EVOLUTION_SEND_URL = f"{EVOLUTION_BASE_URL}/message/sendText/{INSTANCE_NAME}"
 CAL_BOOKINGS_URL = "https://api.cal.com/v2/bookings"
@@ -371,6 +371,9 @@ def enviar_whatsapp_cloud(telefono, mensaje):
                 time.sleep(4)
     return False
 
+PROCESSED_CALL_IDS = set()
+PROCESSED_LOCK = threading.Lock()
+
 def procesar_evento_vapi(payload):
     msg = payload.get("message", {})
     tipo = msg.get("type") or payload.get("type")
@@ -382,6 +385,13 @@ def procesar_evento_vapi(payload):
         return
 
     call_obj = msg.get("call") or payload.get("call") or {}
+    call_id = call_obj.get("id") or msg.get("callId")
+    if call_id:
+        with PROCESSED_LOCK:
+            if call_id in PROCESSED_CALL_IDS:
+                log(f"ℹ️ Llamada {call_id} ya procesada. Ignorando duplicado.")
+                return
+            PROCESSED_CALL_IDS.add(call_id)
     customer = msg.get("customer") or call_obj.get("customer") or {}
     numero_cliente = customer.get("number")
     if not numero_cliente:
